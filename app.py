@@ -1,8 +1,10 @@
 from flask import Flask, jsonify
+from flask_cors import CORS
 from kaggle.api.kaggle_api_extended import KaggleApi
 import os
 
 app = Flask(__name__)
+CORS(app)  # Enable CORS for all routes and origins
 
 # Home route
 @app.route('/')
@@ -34,6 +36,5 @@ def list_kaggle_files(owner, dataset):
         return jsonify({"error": str(e)}), 400
 
 if __name__ == '__main__':
-
     port = int(os.environ.get("PORT", 5000))
     app.run(host='0.0.0.0', port=port)
