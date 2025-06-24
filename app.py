@@ -9,8 +9,9 @@ import json
 from datetime import datetime
 
 app = Flask(__name__)
-CORS(app, supports_credentials=True)  # Enable CORS with credentials
-
+CORS(app, supports_credentials=True, resources={
+    r"/*": {"origins": "http://127.0.0.1:5500"}
+})
 # Store session data for each instance
 instance_sessions = {}
 
@@ -138,7 +139,14 @@ def proxy_request(instance_id):
                 instance_sessions[instance_id]['cookies'][cookie.name] = cookie.value
         
         # Create response
-        excluded_headers = ['content-encoding', 'content-length', 'transfer-encoding', 'connection']
+        excluded_headers = [
+    'content-encoding',
+    'content-length',
+    'transfer-encoding',
+    'connection',
+    'x-frame-options',
+    'content-security-policy'  
+]
         response_headers = [(name, value) for (name, value) in response.headers.items()
                           if name.lower() not in excluded_headers]
         
