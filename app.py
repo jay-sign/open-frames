@@ -1,206 +1,194 @@
-from flask import Flask, request, Response, jsonify, session
+from flask import Flask, request, jsonify
+from huggingface_hub import HfApi, upload_file
+from urllib.parse import quote, unquote
+from pathlib import Path
 from flask_cors import CORS
-from kaggle.api.kaggle_api_extended import KaggleApi
-import requests
+import yt_dlp
 import os
-import uuid
-from urllib.parse import urljoin, urlparse
-import json
-from datetime import datetime
 
 app = Flask(__name__)
-CORS(app, supports_credentials=True, resources={
-    r"/*": {"origins": "http://127.0.0.1:5500"}
-})
-# Store session data for each instance
-instance_sessions = {}
+CORS(app)  # Enable CORS for all routes and origins
 
-# Home route
-@app.route('/')
-def home():
-    return '✅ Flask backend is running on Render with Multi-Instance Browser support.'
+class Cache():
+    def __init__(self):
+        self.api = HfApi()
+        self.token = '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'
+        self.repo_id = 'neuronode/datasets-cache'
+        self.repo_type = 'dataset'
 
-# Create a new browser instance
-@app.route('/create-instance', methods=['POST'])
-def create_instance():
-    try:
-        data = request.get_json()
-        instance_id = str(uuid.uuid4())
-        
-        # Initialize session storage for this instance
-        instance_sessions[instance_id] = {
-            'cookies': {},
-            'headers': {},
-            'created_at': datetime.now().isoformat(),
-            'name': data.get('name', 'Unnamed Instance'),
-            'base_url': data.get('url', '')
-        }
-        
-        return jsonify({
-            'success': True,
-            'instance_id': instance_id,
-            'message': 'Instance created successfully'
-        })
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-# Delete a browser instance
-@app.route('/delete-instance/<instance_id>', methods=['DELETE'])
-def delete_instance(instance_id):
-    try:
-        if instance_id in instance_sessions:
-            del instance_sessions[instance_id]
-            return jsonify({
-                'success': True,
-                'message': 'Instance deleted successfully'
-            })
-        else:
-            return jsonify({'error': 'Instance not found'}), 404
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-# Get all instances
-@app.route('/instances', methods=['GET'])
-def get_instances():
-    try:
-        instances = []
-        for instance_id, data in instance_sessions.items():
-            instances.append({
-                'id': instance_id,
-                'name': data['name'],
-                'base_url': data['base_url'],
-                'created_at': data['created_at']
-            })
-        return jsonify({'instances': instances})
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
-
-# Proxy requests for specific instance
-@app.route('/proxy/<instance_id>', methods=['GET', 'POST', 'PUT', 'DELETE', 'PATCH'])
-def proxy_request(instance_id):
-    try:
-        if instance_id not in instance_sessions:
-            return jsonify({'error': 'Instance not found'}), 404
-        
-        # Get the target URL from query parameter
-        target_url = request.args.get('url')
-        if not target_url:
-            return jsonify({'error': 'URL parameter required'}), 400
-        
-        # Prepare the request
-        method = request.method
-        headers = dict(request.headers)
-        
-        # Remove headers that shouldn't be forwarded
-        headers_to_remove = ['Host', 'Origin', 'Referer']
-        for header in headers_to_remove:
-            headers.pop(header, None)
-        
-        # Add stored headers for this instance
-        instance_data = instance_sessions[instance_id]
-        if 'headers' in instance_data:
-            headers.update(instance_data['headers'])
-        
-        # Prepare cookies for this instance
-        cookies = instance_data.get('cookies', {})
-        
-        # Make the request
-        if method == 'GET':
-            response = requests.get(
-                target_url, 
-                headers=headers, 
-                cookies=cookies,
-                allow_redirects=True,
-                timeout=30
+        if not self.api.repo_exists(repo_id=self.repo_id, repo_type=self.repo_type, token=self.token):
+            self.api.create_repo(
+                repo_id=self.repo_id,
+                token=self.token,
+                repo_type=self.repo_type,
+                private=True
             )
-        elif method == 'POST':
-            response = requests.post(
-                target_url,
-                headers=headers,
-                cookies=cookies,
-                data=request.get_data(),
-                allow_redirects=True,
-                timeout=30
-            )
-        else:
-            response = requests.request(
-                method,
-                target_url,
-                headers=headers,
-                cookies=cookies,
-                data=request.get_data(),
-                allow_redirects=True,
-                timeout=30
-            )
-        
-        # Store cookies from response for this instance
-        if response.cookies:
-            for cookie in response.cookies:
-                instance_sessions[instance_id]['cookies'][cookie.name] = cookie.value
-        
-        # Create response
-        excluded_headers = [
-    'content-encoding',
-    'content-length',
-    'transfer-encoding',
-    'connection',
-    'x-frame-options',
-    'content-security-policy'  
-]
-        response_headers = [(name, value) for (name, value) in response.headers.items()
-                          if name.lower() not in excluded_headers]
-        
-        # Modify content if it's HTML to fix relative URLs
-        content = response.content
-        if 'text/html' in response.headers.get('content-type', ''):
-            try:
-                content_str = content.decode('utf-8')
-                # Replace relative URLs with proxy URLs
-                base_url = f"{request.scheme}://{request.host}/proxy/{instance_id}"
-                parsed_target = urlparse(target_url)
-                target_base = f"{parsed_target.scheme}://{parsed_target.netloc}"
-                
-                # Replace common relative URL patterns
-                content_str = content_str.replace('href="/', f'href="{base_url}?url={target_base}/')
-                content_str = content_str.replace('src="/', f'src="{base_url}?url={target_base}/')
-                content_str = content_str.replace("href='/", f"href='{base_url}?url={target_base}/")
-                content_str = content_str.replace("src='/", f"src='{base_url}?url={target_base}/")
-                
-                content = content_str.encode('utf-8')
-            except:
-                pass  # If decoding fails, return original content
-        
-        return Response(
-            content,
-            status=response.status_code,
-            headers=response_headers
+
+    def file_exists(self, file_id):
+        return self.api.file_exists(filename=file_id, repo_id=self.repo_id, repo_type=self.repo_type, token=self.token)
+
+    def list_files(self):
+        '''List all files in the cache'''
+        files = self.api.list_repo_files(repo_id=self.repo_id, repo_type=self.repo_type, token=self.token)
+        return files
+
+    def add(self, path, file_id=None):
+        if file_id is None:
+            file_id = os.path.basename(path)
+
+        '''Add a file to the cache'''
+        upload_file(path_or_fileobj=path,
+                    path_in_repo=file_id,
+                    repo_id=self.repo_id,
+                    repo_type=self.repo_type,
+                    token=self.token
+                    )
+        print(f"Added {file_id}")
+
+    def delete(self, file_id):
+        '''Delete a file from the cache'''
+        if not self.file_exists(file_id):
+            return
+        self.api.delete_file(
+            path_in_repo=file_id,
+            repo_id=self.repo_id,
+            repo_type=self.repo_type,
+            token=self.token
         )
-        
-    except requests.exceptions.RequestException as e:
-        return jsonify({'error': f'Request failed: {str(e)}'}), 500
-    except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        print(f"Deleted {file_id}")
 
-# Dynamic Kaggle dataset file listing (keeping your original functionality)
-@app.route('/list-files/<owner>/<dataset>')
-def list_kaggle_files(owner, dataset):
+    def delete_folder(self, folder_name):
+        '''Delete all files in a folder from the cache'''
+        folder_name = folder_name.rstrip("/") + "/"  # Ensure it ends with '/'
+        files = self.list_files()
+        for file_id in files:
+            if Path(file_id).as_posix().startswith(folder_name):
+                self.delete(file_id)
+
+    def get(self, file_id):
+        '''Download a file from the cache'''
+        file_path = hf_hub_download(
+            repo_id=self.repo_id,
+            repo_type=self.repo_type,
+            filename=file_id,
+            token=self.token,
+            cache_dir=os.getcwd()
+        )
+        print(f"Downloaded {file_id}")
+        return file_path
+
+    def get_all(self, folder_name=None):
+        '''List all files in the cache, optionally filtered by folder'''
+
+        def contains_folder(path, folder):
+            if folder is None:
+                return True
+            return folder in Path(path).parts
+
+        file_ids = self.list_files()
+        file_paths = []
+
+        for file_id in file_ids:
+            if contains_folder(file_id, folder_name):
+                file_paths.append(self.get(file_id))
+
+        return file_paths
+
+    def __len__(self):
+        return len(self.list_files())
+
+    def __getitem__(self, index):
+        files = self.list_files()
+        if isinstance(index, slice):
+            return [self.get(f) for f in files[index]]
+
+        return self.get(files[index])
+
+    def clear(self):
+        '''Deletes all files in the cache'''
+        files = self.list_files()
+        for file_id in files:
+            self.delete(file_id)
+
+    def restore_from_revision(self, revision):
+        """
+        Restores all files from a previous commit or tag to the main branch.
+
+        Args:
+            revision (str): The commit hash or named revision (e.g. "2e3aaa8").
+        """
+        print(f"Restoring files from revision: {revision}")
+
+        # List files from the revision
+        files = self.api.list_repo_files(
+            repo_id=self.repo_id,
+            repo_type=self.repo_type,
+            token=self.token,
+            revision=revision
+        )
+
+        for file in files:
+            try:
+                # Download the file from the given revision
+                file_path = hf_hub_download(
+                    repo_id=self.repo_id,
+                    repo_type=self.repo_type,
+                    filename=file,
+                    token=self.token,
+                    revision=revision
+                )
+                # Re-upload to main
+                self.add(path=file_path, file_id=file)
+            except Exception as e:
+                print(f"Failed to restore {file}: {e}")
+
+        print("Restore complete.")
+        
+# Global download path
+file_path = None
+
+def on_progress(d):
+    global file_path
+    if d['status'] == 'finished':
+        file_path = d['info_dict'].get('_filename', d['filename'])
+
+@app.route('/download/<path:yt_url>')
+def download_and_cache(yt_url):
     try:
-        # Authenticate using env vars
-        api = KaggleApi()
-        api.authenticate()
-        # Build full dataset identifier
-        dataset_path = f"{owner}/{dataset}"
-        # Fetch file list
-        files = api.dataset_list_files(dataset_path).files
-        file_names = [f.name for f in files]
-        return jsonify({
-            "dataset": dataset_path,
-            "file_count": len(file_names),
-            "files": file_names
-        })
+        # Reconstruct full YouTube URL
+        yt_url = unquote(yt_url)
+
+        # Download using yt_dlp
+        global file_path
+        file_path = None
+        ydl_opts = {
+            'format': 'bestvideo+bestaudio/best',
+            'merge_output_format': 'mp4',
+            'outtmpl': '%(title)s.%(ext)s',
+            'progress_hooks': [on_progress],
+        }
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([yt_url])
+
+        if not file_path or not os.path.exists(file_path):
+            return jsonify({"error": "Failed to download video"}), 500
+
+        abs_path = os.path.abspath(file_path)
+        hf_path = os.path.join("yt-cache", file_path)
+
+        # Upload to Hugging Face
+        cache = Cache()
+        cache.add(abs_path, hf_path)
+
+        # Return download URL
+        encoded_path = quote(hf_path)
+        download_url = f"https://huggingface.co/datasets/{cache.repo_id}/resolve/main/{encoded_path}?download=true"
+
+        return jsonify({"status": "success", "url": download_url})
+    
     except Exception as e:
-        return jsonify({"error": str(e)}), 400
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host='0.0.0.0', port=port, debug=True)
+    app.run(debug=True, port=5000)
