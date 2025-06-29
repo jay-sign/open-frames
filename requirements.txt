@@ -4,3 +4,4 @@ gunicorn
 kaggle
 flask-cors
 yt-dlp
+huggingface_hub
