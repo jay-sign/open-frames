@@ -3,3 +3,4 @@ werkzeug==2.2.3
 gunicorn
 kaggle
 flask-cors
+yt-dlp
